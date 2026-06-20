@@ -92,10 +92,18 @@ let goodProgress       = 0;
 let collectedIds       = [];   // 수집한 정령 id 배열
 let currentSpirit      = null; // 현재 등장 중인 정령 객체
 let giveUpStartTime    = null; // 포기하기 페이드아웃 시작 시각 (null=비활성)
-let dexPage            = 0;    // 도감 페이지 (0=1페이지, 1=2페이지)
-let currentSpiritImgVariant = 0; // State2에서 선택한 sad 이미지 버전 (0 또는 1)
-let appearTime         = null;   // 등장 이펙트 시작 시각
-let collectTime        = null;   // 수집 성공 시각 (글로우 링 3초)
+let dexPage            = 0;
+let currentSpiritImgVariant = 0;
+let appearTime         = null;
+let collectTime        = null;
+let popupSpirit        = null;   // 현재 열린 팝업의 정령 객체 (null=팝업 닫힘)
+let showingSpecial     = false;  // 특별 일러스트 풀스크린 표시 여부
+
+// 정령별 통계: { met, giveUp, collected }
+let spiritStats = {};
+
+// 특별 일러스트 이미지
+let spiritSpecialImgs = [];
 let modelReady         = false;
 let modelError         = false;
 let isClassifying      = false;
@@ -127,7 +135,8 @@ let spiritImgs     = [];              // 도감용 기본 이미지 spirit_N.png
 let spiritSadImgs  = [[], []];        // 잘못된 주차 표현 [0]=sad_0, [1]=sad_1
 let spiritHappyImgs = [];             // 올바른 주차 완료 기쁨 이미지
 let bgDotImg  = null;
-let cardBgImg = null; // 도감 칸 배경 이미지 (images/card_bg.png)
+let cardBgImg = null;
+let loadingImg= null; // 로딩 화면 이미지 (images/roading.png)
 
 // ─── 오디오 ───────────────────────────────────────────────────────────────────
 let sndAppear  = null; // 정령등장.mp3
@@ -206,6 +215,20 @@ const sketch = (p) => {
     cbd.onload  = function() { cardBgImg = cbd; };
     cbd.onerror = function() { cardBgImg = null; };
     cbd.src = 'images/card_bg.png';
+    // 로딩 화면 이미지
+    let ldi = new window.Image();
+    ldi.onload  = function() { loadingImg = ldi; };
+    ldi.onerror = function() { loadingImg = null; };
+    ldi.src = 'images/roading.png';
+    // 특별 일러스트 이미지: images/spirit_N_special.jpeg
+    for (let i = 0; i < SPIRITS.length; i++) {
+      (function(idx) {
+        let img = new window.Image();
+        img.onload  = function() { spiritSpecialImgs[idx] = img; };
+        img.onerror = function() { spiritSpecialImgs[idx] = null; };
+        img.src = 'images/spirit_' + idx + '_special.jpeg';
+      })(i);
+    }
   };
 
   p.setup = function () {
@@ -215,6 +238,7 @@ const sketch = (p) => {
     p.textFont('monospace');  // 폰트 로드 전 폴백
     p.textStyle(p.BOLD);
     collectedIds = loadSpiritData();
+    spiritStats  = loadSpiritStats();
     fitCanvas();
     window.addEventListener('resize', fitCanvas);
 
@@ -337,6 +361,28 @@ function handleTap(sx, sy) {
   let my = (sy - canvasOffsetY) / canvasScale;
   if (mx < 0 || mx > CANVAS_W || my < 0 || my > CANVAS_H) return;
 
+  // ── 팝업/특별 일러스트 — 최우선 처리 ────────────────────────────────────
+  if (showingSpecial) {
+    playSound(sndClick);
+    showingSpecial = false;
+    return;
+  }
+  if (popupSpirit !== null) {
+    let py = 120;
+    // 특별 일러스트 버튼
+    if (specialUnlocked(popupSpirit) && hit(mx,my,30,py+378,300,48)) {
+      playSound(sndClick);
+      showingSpecial = true;
+    }
+    // 닫기 버튼
+    else if (hit(mx,my,120,py+438,120,44)) {
+      playSound(sndClick);
+      popupSpirit = null;
+    }
+    return; // 팝업 열린 동안 다른 탭 차단
+  }
+
+  // ── 일반 버튼 핸들러 ─────────────────────────────────────────────────────
   if (currentState === 1 && hit(mx,my,256,8,90,34)) {
     playSound(sndClick);
     currentState=5;
@@ -349,12 +395,17 @@ function handleTap(sx, sy) {
   else if (currentState === 2 && hit(mx,my,262,715,84,55)) {
     if (!giveUpStartTime) {
       giveUpStartTime = pInst.millis();
-      playSound(sndGiveUp,3); // 버튼 누르는 순간 바로 재생
+      if (currentSpirit) addStat(currentSpirit.id, 'giveUp');
+      playSound(sndGiveUp);
     }
   }
   else if (currentState === 4 && hit(mx,my,60,715,240,55)) {
     playSound(sndClick);
-    if(currentSpirit) { collectedIds.push(currentSpirit.id); saveSpiritData(); }
+    if(currentSpirit) {
+      collectedIds.push(currentSpirit.id);
+      addStat(currentSpirit.id, 'collected');
+      saveSpiritData();
+    }
     currentState=5;
   }
   else if (currentState === 5 && hit(mx,my,14,700,158,36)) {
@@ -368,6 +419,22 @@ function handleTap(sx, sy) {
   else if (currentState === 5 && hit(mx,my,60,742,240,48)) {
     playSound(sndClick);
     currentState=1; resetDetect(); dexPage=0;
+  }
+  // 도감 칸 탭 — 팝업 열기
+  else if (currentState === 5) {
+    let cols=2, cW=161, cH=170, gapX=10, gapY=10, sx=14, sy=130;
+    let start = dexPage * 6;
+    for (let i=0; i<6; i++) {
+      let idx = start + i;
+      if (idx >= SPIRITS.length) break;
+      let r=Math.floor(i/cols), c=i%cols;
+      let cx = sx + c*(cW+gapX), cy = sy + r*(cH+gapY);
+      if (hit(mx,my,cx,cy,cW,cH) && collectedIds.includes(SPIRITS[idx].id)) {
+        playSound(sndClick);
+        popupSpirit = SPIRITS[idx];
+        break;
+      }
+    }
   }
 }
 function hit(mx,my,x,y,w,h){ return mx>x&&mx<x+w&&my>y&&my<y+h; }
@@ -432,18 +499,126 @@ function getLegendScale(t) {
   if (t < 0.8) return lerp(1.12, 0.95, (t-0.6)/0.2);
   return             lerp(0.95, 1.0,  (t-0.8)/0.2);
 }
+// ── 정령 상세 팝업 ────────────────────────────────────────────────────────────
+function drawSpiritPopup(p, sp) {
+  p.push();
+
+  // 반투명 오버레이
+  p.fill(0, 0, 0, 180); p.noStroke(); p.rect(0, 0, CANVAS_W, CANVAS_H);
+
+  let px=20, py=120, pw=320, ph=490;
+  drawPixelFrame(p, px, py, pw, ph, p.color(15, 8, 40));
+
+  // 정령 이미지
+  let img = spiritImgs[sp.id] || null;
+  if (img) {
+    let iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+    let scale=Math.min(130/iw, 130/ih);
+    let dw=iw*scale, dh=ih*scale;
+    p.drawingContext.save();
+    p.drawingContext.drawImage(img, px+pw/2-dw/2, py+18, dw, dh);
+    p.drawingContext.restore();
+  }
+
+  // 이름
+  setFont(p, 16, 'bold'); p.textAlign(p.CENTER, p.TOP); p.noStroke();
+  p.fill(COL.starGold); p.text(sp.name, px+pw/2, py+158);
+
+  // 희귀도
+  setFont(p, 11, 'bold'); p.textAlign(p.CENTER, p.TOP); p.noStroke();
+  p.fill(255, 255, 255); p.text(RARITY_LABEL[sp.rarity], px+pw/2, py+184);
+
+  // 구분선
+  p.fill(COL.btnPurple); p.noStroke(); p.rect(px+20, py+210, pw-40, 2);
+
+  // 통계
+  let stat = getStat(sp.id);
+  let needed = sp.rarity === 3 ? 3 : sp.rarity === 2 ? 5 : 10;
+  let rows = [
+    ['만난 횟수',   stat.met],
+    ['포기한 횟수', stat.giveUp],
+    ['수집 성공',   stat.collected],
+  ];
+  for (let i=0; i<rows.length; i++) {
+    let label = rows[i][0], val = rows[i][1];
+    let ty = py + 224 + i * 46;
+    setFont(p, 13, 'bold'); p.noStroke();
+    p.fill(200, 200, 220); p.textAlign(p.LEFT, p.TOP);
+    p.text(label, px+30, ty);
+    p.fill(255, 255, 255); p.textAlign(p.RIGHT, p.TOP);
+    p.text(val+'회', px+pw-30, ty);
+    if (i === 2) {
+      setFont(p, 9, 'bold'); p.textAlign(p.LEFT, p.TOP);
+      p.fill(stat.collected >= needed ? '#7fff60' : '#aaaaaa');
+      p.text('특별해금: '+needed+'회 필요', px+30, ty+22);
+    }
+  }
+
+  // 구분선
+  p.fill(COL.btnPurple); p.noStroke(); p.rect(px+20, py+366, pw-40, 2);
+
+  // 특별 일러스트 버튼
+  let unlocked = specialUnlocked(sp);
+  if (unlocked) {
+    drawPixelButton(p, px+10, py+378, pw-20, 48, '✦ 특별 일러스트 보기', 'yellow');
+  } else {
+    p.fill(50, 35, 70); p.noStroke(); p.rect(px+10, py+378, pw-20, 48, 4);
+    setFont(p, 11, 'bold'); p.textAlign(p.CENTER, p.CENTER); p.noStroke();
+    p.fill(120, 100, 140); p.text('🔒 특별 일러스트 (잠김)', px+pw/2, py+402);
+  }
+
+  // 닫기 버튼
+  drawPixelButton(p, 120, py+438, 120, 44, '닫기', 'purple');
+
+  p.pop();
+}
+
+// ── 특별 일러스트 풀스크린 ────────────────────────────────────────────────────
+function drawSpecialIllust(p, sp) {
+  p.push();
+  p.fill(0, 0, 0, 230); p.noStroke(); p.rect(0, 0, CANVAS_W, CANVAS_H);
+  let img = spiritSpecialImgs[sp.id] || null;
+  if (img) {
+    let iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+    let scale=Math.min(340/iw, 620/ih);
+    let dw=iw*scale, dh=ih*scale;
+    p.drawingContext.save();
+    p.drawingContext.drawImage(img, CANVAS_W/2-dw/2, CANVAS_H/2-dh/2, dw, dh);
+    p.drawingContext.restore();
+  } else {
+    setFont(p, 13, 'bold'); p.textAlign(p.CENTER, p.CENTER); p.noStroke();
+    p.fill(COL.txtLight); p.text('준비중입니다', CANVAS_W/2, CANVAS_H/2-16);
+    setFont(p, 9, 'bold');
+    p.fill(160,160,160); p.text('spirit_'+sp.id+'_special.jpeg', CANVAS_W/2, CANVAS_H/2+14);
+  }
+  setFont(p, 10, 'bold'); p.textAlign(p.CENTER, p.BOTTOM); p.noStroke();
+  p.fill(200,200,200); p.text('화면을 탭하면 닫힙니다', CANVAS_W/2, CANVAS_H-20);
+  p.pop();
+}
+
 function drawLoading(p) {
   p.background(COL.bgDark);
-  let t = p.millis()/1000;
-  let pulse = p.sin(t*3)*10;
-  p.fill(COL.outline); p.noStroke(); p.ellipse(CANVAS_W/2, CANVAS_H/2-20+pulse, 74, 74);
-  p.fill(COL.btnPurple); p.noStroke(); p.ellipse(CANVAS_W/2, CANVAS_H/2-20+pulse, 70, 70);
-  p.fill(COL.btnPurpleHi); p.noStroke(); p.ellipse(CANVAS_W/2, CANVAS_H/2-20+pulse, 54, 54);
-  p.fill(255,255,255,180); p.noStroke(); p.ellipse(CANVAS_W/2-10, CANVAS_H/2-32+pulse, 18, 12);
-  // MD bold(11px) 로딩 텍스트
-  let dots = '.'.repeat(Math.floor(p.millis()/400)%4);
-  setFont(p, 11, 'bold'); p.textAlign(p.CENTER,p.CENTER); p.noStroke();
-  p.fill(COL.txtLight); p.text('모델 로딩중'+dots, CANVAS_W/2, CANVAS_H/2+40);
+
+  let t     = p.millis() / 1000;
+  let float = Math.sin(t * 2.2) * 14; // 둥둥 부유 (-14 ~ +14px)
+  let imgSize = 220;
+  let cx  = CANVAS_W / 2;
+  let imgY = CANVAS_H / 2 - 80 + float; // 텍스트 위쪽에 위치
+
+  // 로딩 이미지 (이미지가 로드됐을 때만)
+  if (loadingImg) {
+    // 이미지 비율 유지
+    let iw = loadingImg.naturalWidth  || loadingImg.width;
+    let ih = loadingImg.naturalHeight || loadingImg.height;
+    let scale = Math.min(imgSize / iw, imgSize / ih);
+    let dw = iw * scale, dh = ih * scale;
+    p.drawingContext.drawImage(loadingImg, cx - dw/2, imgY - dh/2, dw, dh);
+  }
+
+  // 로딩 텍스트 (이미지 아래)
+  let dots = '.'.repeat(Math.floor(p.millis() / 400) % 4);
+  setFont(p, 13, 'bold'); p.textAlign(p.CENTER, p.CENTER); p.noStroke();
+  p.fill(COL.txtLight); p.text('모델 로딩중' + dots, cx, CANVAS_H / 2 + 80);
 }
 function drawError(p) {
   p.background(COL.bgDark);
@@ -484,6 +659,7 @@ function drawState1(p) {
       currentSpiritImgVariant = Math.floor(Math.random() * 2);
       detectionStartTime=null; badProgress=0;
       appearTime = p.millis();
+      addStat(currentSpirit.id, 'met'); // 만남 횟수
       playSound(sndAppear);
       currentState=2;
     }
@@ -770,6 +946,12 @@ function drawState5(p) {
 
   // 돌아가기 버튼
   drawPixelButton(p, 60, 742, 240, 48, '돌아가기', 'purple');
+
+  // 팝업 (칸 클릭 시)
+  if (popupSpirit !== null) drawSpiritPopup(p, popupSpirit);
+
+  // 특별 일러스트 풀스크린
+  if (showingSpecial && popupSpirit !== null) drawSpecialIllust(p, popupSpirit);
 }
 
 // 정령 등장 화면 배경 — 전체 화면에 bg_dot 이미지를 꽉 채움
@@ -1235,6 +1417,26 @@ function loadSpiritData() {
 }
 function saveSpiritData() {
   localStorage.setItem('kickboard_spirits_v2', JSON.stringify(collectedIds));
+}
+function loadSpiritStats() {
+  try { return JSON.parse(localStorage.getItem('kickboard_stats_v1') || '{}'); } catch(e) { return {}; }
+}
+function saveSpiritStats() {
+  localStorage.setItem('kickboard_stats_v1', JSON.stringify(spiritStats));
+}
+function addStat(id, key) {
+  if (!spiritStats[id]) spiritStats[id] = { met:0, giveUp:0, collected:0 };
+  spiritStats[id][key]++;
+  saveSpiritStats();
+}
+function getStat(id) {
+  return spiritStats[id] || { met:0, giveUp:0, collected:0 };
+}
+function specialUnlocked(sp) {
+  if (!sp) return false;
+  let stat = getStat(sp.id);
+  let needed = sp.rarity === 3 ? 3 : sp.rarity === 2 ? 5 : 10;
+  return stat.collected >= needed;
 }
 
 // ─── BOOT ─────────────────────────────────────────────────────────────────────

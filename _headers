@@ -1,0 +1,15 @@
+# Netlify 배포용 헤더 설정
+/*
+  Access-Control-Allow-Origin: *
+
+/model/*
+  Content-Type: application/octet-stream
+  Access-Control-Allow-Origin: *
+
+/model/model.json
+  Content-Type: application/json
+  Access-Control-Allow-Origin: *
+
+/model/metadata.json
+  Content-Type: application/json
+  Access-Control-Allow-Origin: *

@@ -129,6 +129,41 @@ let spiritHappyImgs = [];             // 올바른 주차 완료 기쁨 이미�
 let bgDotImg  = null;
 let cardBgImg = null; // 도감 칸 배경 이미지 (images/card_bg.png)
 
+// ─── 오디오 ───────────────────────────────────────────────────────────────────
+let sndAppear  = null; // 정령등장.mp3
+let sndSuccess = null; // 구조성공.mp3
+let sndGiveUp  = null; // 포기.mp3
+let sndProgress= null; // 프로그래스_바_채워질때.mp3
+let sndClick   = null; // 버튼클릭음.mp3
+
+function loadSounds() {
+  function makeAudio(src) {
+    let a = new Audio('sounds/' + src);
+    a.preload = 'auto';
+    return a;
+  }
+  sndAppear   = makeAudio('정령등장.mp3');
+  sndSuccess  = makeAudio('구조성공.mp3');
+  sndGiveUp   = makeAudio('포기.mp3');
+  sndProgress = makeAudio('프로그래스_바_채워질때.mp3');
+  sndClick    = makeAudio('버튼클릭음.mp3');
+  sndProgress.loop = true;
+}
+
+function playSound(snd, startSec) {
+  if (!snd) return;
+  try {
+    snd.pause();
+    snd.currentTime = startSec || 0;
+    snd.play().catch(function(){});
+  } catch(e) {}
+}
+
+function stopSound(snd) {
+  if (!snd) return;
+  try { snd.pause(); snd.currentTime = 0; } catch(e) {}
+}
+
 const sketch = (p) => {
 
   // ── preload: 정령 이미지 6장 로드 ──────────────────────────────────────────
@@ -195,6 +230,7 @@ const sketch = (p) => {
     });
 
     startCamera(p);
+    loadSounds();
   };
 
   p.draw = function () {
@@ -302,28 +338,35 @@ function handleTap(sx, sy) {
   if (mx < 0 || mx > CANVAS_W || my < 0 || my > CANVAS_H) return;
 
   if (currentState === 1 && hit(mx,my,256,8,90,34)) {
+    playSound(sndClick);
     currentState=5;
   }
   else if (currentState === 2 && hit(mx,my,14,715,240,55)) {
-    // 수집하러 가기
+    playSound(sndClick);
     giveUpStartTime=null;
     currentState=3; detectionStartTime=null; goodProgress=0;
   }
   else if (currentState === 2 && hit(mx,my,262,715,84,55)) {
-    // 포기하기 — 페이드아웃 시작
-    if (!giveUpStartTime) giveUpStartTime = pInst.millis();
+    if (!giveUpStartTime) {
+      giveUpStartTime = pInst.millis();
+      playSound(sndGiveUp,3); // 버튼 누르는 순간 바로 재생
+    }
   }
   else if (currentState === 4 && hit(mx,my,60,715,240,55)) {
+    playSound(sndClick);
     if(currentSpirit) { collectedIds.push(currentSpirit.id); saveSpiritData(); }
     currentState=5;
   }
   else if (currentState === 5 && hit(mx,my,14,700,158,36)) {
-    dexPage=0; // 1페이지
+    playSound(sndClick);
+    dexPage=0;
   }
   else if (currentState === 5 && hit(mx,my,180,700,166,36)) {
-    dexPage=1; // 2페이지
+    playSound(sndClick);
+    dexPage=1;
   }
   else if (currentState === 5 && hit(mx,my,60,742,240,48)) {
+    playSound(sndClick);
     currentState=1; resetDetect(); dexPage=0;
   }
 }
@@ -429,17 +472,23 @@ function drawState1(p) {
   drawBottomPanel(p, badProgress, false);
 
   if (currentLabel==='Bad_Parking' && confidence>=CONFIDENCE_THRESHOLD_BAD) {
-    if (!detectionStartTime) detectionStartTime = p.millis();
+    if (!detectionStartTime) {
+      detectionStartTime = p.millis();
+      playSound(sndProgress); // 감지 시작 → 프로그레스 사운드 반복 재생
+    }
     let e = p.millis()-detectionStartTime;
     badProgress = Math.min(e/HOLD_DURATION, 1);
     if (e >= HOLD_DURATION) {
+      stopSound(sndProgress);
       currentSpirit = rollSpirit();
       currentSpiritImgVariant = Math.floor(Math.random() * 2);
       detectionStartTime=null; badProgress=0;
-      appearTime = p.millis(); // 등장 이펙트 시작
+      appearTime = p.millis();
+      playSound(sndAppear);
       currentState=2;
     }
   } else {
+    if (detectionStartTime) stopSound(sndProgress); // 감지 중단 → 사운드 정지
     detectionStartTime=null; badProgress=0;
   }
 }
@@ -448,7 +497,7 @@ function drawState1(p) {
 // giveUpStartTime 기준 t=0~1 (1초)
 function drawSmokeEffect(p, cx, cy) {
   if (giveUpStartTime === null) return;
-  let t   = Math.min((p.millis() - giveUpStartTime) / 1000, 1); // 포기 진행도 0~1
+  let t   = Math.min((p.millis() - giveUpStartTime) / 3000, 1); // 포기 진행도 0~1 (3초)
   let now = p.millis() / 1000;
 
   // ── 파티클 정의 (seed 고정으로 떨림 없음) ─────────────────────────────────
@@ -520,10 +569,10 @@ function drawState2(p) {
   let isFading  = false;
   if (giveUpStartTime !== null) {
     let elapsed = p.millis() - giveUpStartTime;
-    let progress = Math.min(elapsed / 1000, 1); // 0~1 (1초)
+    let progress = Math.min(elapsed / 3000, 1); // 0~1 (3초)
     fadeAlpha = Math.floor(255 * (1 - progress));
     isFading  = true;
-    // 1초 완료 → State1 복귀
+    // 3초 완료 → State1 복귀
     if (progress >= 1) {
       giveUpStartTime = null;
       currentSpirit   = null;
@@ -607,11 +656,20 @@ function drawState3(p) {
   drawBottomPanel(p, goodProgress, true);
 
   if (currentLabel==='Good_Parking' && confidence>=CONFIDENCE_THRESHOLD_GOOD) {
-    if (!detectionStartTime) detectionStartTime = p.millis();
+    if (!detectionStartTime) {
+      detectionStartTime = p.millis();
+      playSound(sndProgress); // 감지 시작 → 프로그레스 사운드 반복 재생
+    }
     let e = p.millis()-detectionStartTime;
     goodProgress = Math.min(e/HOLD_DURATION, 1);
-    if (e >= HOLD_DURATION) { detectionStartTime=null; goodProgress=0; collectTime=p.millis(); currentState=4; }
+    if (e >= HOLD_DURATION) {
+      stopSound(sndProgress);
+      detectionStartTime=null; goodProgress=0; collectTime=p.millis();
+      playSound(sndSuccess); // 구조 성공 사운드
+      currentState=4;
+    }
   } else {
+    if (detectionStartTime) stopSound(sndProgress); // 감지 중단 → 사운드 정지
     detectionStartTime=null;
     goodProgress = Math.max(0, goodProgress-0.01);
   }
